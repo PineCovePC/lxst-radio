@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
     <meta name="theme-color" content="#0b120e" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="LXST" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="stylesheet" href="./styles.css" />
     <title>LXST Radio</title>
@@ -47,15 +45,41 @@
         <section data-panel="mesh" hidden>
           <div class="radar-wrap">
             <canvas id="radar" width="360" height="360"></canvas>
-            <div class="radar-legend">
-              <span>tap a blip</span>
-              <button class="ghost tiny" id="btn-link" type="button">Link</button>
+            <div class="radar-legend"><span>tap a station</span></div>
+          </div>
+          <div id="station-sheet" class="station-sheet" hidden>
+            <div>
+              <strong id="sheet-name">—</strong>
+              <div class="hash" id="sheet-hash"></div>
+              <div class="muted" id="sheet-meta"></div>
+            </div>
+            <div class="sheet-actions">
+              <button type="button" data-act="chat">Open chat</button>
+              <button type="button" data-act="ptt">Direct PTT</button>
+              <button type="button" data-act="pin">Pin</button>
+              <button type="button" data-act="mute">Mute</button>
             </div>
           </div>
-          <div id="heard" class="heard-strip"></div>
         </section>
         <section data-panel="chat" hidden>
-          <div id="thread-list" class="thread-list"></div>
+          <div id="chat-home">
+            <div class="muted">Tap a station on mesh, or pick a thread.</div>
+            <div id="thread-list" class="thread-list"></div>
+          </div>
+          <div id="chat-room" hidden>
+            <div class="chat-head">
+              <button type="button" id="chat-back" class="ghost tiny">Threads</button>
+              <div>
+                <strong id="chat-title">Chat</strong>
+                <div class="muted" id="chat-sub"></div>
+              </div>
+            </div>
+            <div class="msgs" id="msgs"></div>
+            <form id="chat-form">
+              <input id="chat-input" maxlength="280" placeholder="Message…" autocomplete="off" />
+              <button type="submit">Send</button>
+            </form>
+          </div>
         </section>
         <section data-panel="id" hidden>
           <div class="card">
@@ -68,51 +92,6 @@
             </div>
           </div>
         </section>
-      </div>
-    </div>
-    <div class="sheet" id="sheet" hidden>
-      <div class="sheet-card">
-        <div class="sheet-grab"></div>
-        <div class="kicker" id="sheet-kind">station</div>
-        <h2 id="sheet-name">—</h2>
-        <div class="hash" id="sheet-hash"></div>
-        <div class="sheet-meta" id="sheet-meta"></div>
-        <div class="sheet-grid">
-          <button type="button" data-act="chat">Chat</button>
-          <button type="button" data-act="ptt">Direct PTT</button>
-          <button type="button" data-act="pin">Pin</button>
-          <button type="button" data-act="mute">Mute</button>
-          <button type="button" data-act="copy">Copy ID</button>
-          <button type="button" data-act="watch">Watch</button>
-        </div>
-        <button class="ghost full" id="sheet-close" type="button">Close</button>
-      </div>
-    </div>
-    <div class="chat-win" id="chat-win" hidden>
-      <header>
-        <button type="button" id="chat-back">‹</button>
-        <div>
-          <strong id="chat-title">Chat</strong>
-          <div class="muted" id="chat-sub"></div>
-        </div>
-      </header>
-      <div class="msgs" id="msgs"></div>
-      <form id="chat-form">
-        <input id="chat-input" maxlength="280" placeholder="Message over mesh…" autocomplete="off" />
-        <button type="submit">Send</button>
-      </form>
-    </div>
-    <div class="modal" id="link-modal" hidden>
-      <div class="card">
-        <div class="kicker">Peer handshake</div>
-        <p class="muted">Invite on A, paste on B, paste the answer back on A.</p>
-        <div class="actions">
-          <button class="primary" id="btn-invite" type="button">Create invite</button>
-          <button id="btn-apply" type="button">Apply paste</button>
-        </div>
-        <textarea id="paste" placeholder="Paste offer or answer JSON"></textarea>
-        <textarea id="invite" readonly placeholder="Invite / answer appears here"></textarea>
-        <button class="ghost full" id="link-close" type="button">Done</button>
       </div>
     </div>
     <script src="./app.js"></script>
