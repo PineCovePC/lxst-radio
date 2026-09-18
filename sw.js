@@ -1,21 +1,49 @@
-const CACHE = "lxst-radio-v4";
-const PRECACHE = ["./","index.html","manifest.webmanifest","styles.css","app.js"];
+const CACHE = "lxst-radio-v5";
+const PRECACHE = ["index.html", "manifest.webmanifest", "styles.css?v=5", "app.js?v=5", "favicon.svg"];
+
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches
+      .open(CACHE)
+      .then((c) =>
+        Promise.all(PRECACHE.map((u) => c.add(u).catch(() => {}))),
+      )
+      .then(() => self.skipWaiting()),
+  );
 });
+
 self.addEventListener("activate", (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim()),
+  );
 });
+
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
-  event.respondWith(caches.match(event.request).then((hit) => {
-    const net = fetch(event.request).then((res) => {
-      if (res.ok && new URL(event.request.url).origin === self.location.origin) {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(event.request, copy));
+  const url = new URL(event.request.url);
+  const isDoc =
+    event.request.mode === "navigate" ||
+    url.pathname.endsWith(".html") ||
+    url.pathname.endsWith("/") ||
+    url.pathname.endsWith("/lxst-radio");
+  event.respondWith(
+    (async () => {
+      try {
+        const net = await fetch(event.request);
+        if (net.ok && url.origin === self.location.origin) {
+          const copy = net.clone();
+          caches.open(CACHE).then((c) => c.put(event.request, copy));
+        }
+        return net;
+      } catch {
+        const hit = await caches.match(event.request);
+        if (hit) return hit;
+        if (isDoc) return caches.match("index.html");
+        throw new Error("offline");
       }
-      return res;
-    }).catch(() => hit);
-    return hit || net;
-  }));
+    })(),
+  );
 });

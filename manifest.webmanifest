@@ -1,10 +1,18 @@
 {
   "name": "LXST Radio",
   "short_name": "LXST",
-  "start_url": "./",
+  "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#0b120e",
-  "theme_color": "#0b120e",
-  "orientation": "portrait"
+  "background_color": "#0c0f0d",
+  "theme_color": "#0c0f0d",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
 }
