@@ -1,0 +1,10 @@
+{
+  "name": "LXST Radio",
+  "short_name": "LXST",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b120e",
+  "theme_color": "#0b120e",
+  "orientation": "portrait"
+}

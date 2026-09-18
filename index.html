@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+    <meta name="theme-color" content="#0b120e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="LXST" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>LXST Radio</title>
+  </head>
+  <body>
+    <div class="app">
+      <div class="status">
+        <strong id="clock">--:--</strong>
+        <span>LXST</span>
+        <span class="bars" id="bars"></span>
+      </div>
+      <div class="banner" id="banner" hidden>
+        <span>Install LXST on this phone</span>
+        <button class="ghost" id="btn-install" type="button">Add</button>
+      </div>
+      <div class="tabs four">
+        <button class="active" data-tab="radio" type="button">radio</button>
+        <button data-tab="mesh" type="button">mesh</button>
+        <button data-tab="chat" type="button">chat</button>
+        <button data-tab="id" type="button">id</button>
+      </div>
+      <div class="stage">
+        <section data-panel="radio">
+          <div class="card">
+            <div class="kicker">Local station</div>
+            <div class="hash" id="call"></div>
+            <div class="muted" id="direct-line">Broadcast · all heard</div>
+          </div>
+          <div class="ptt-wrap">
+            <button class="ptt" id="ptt" type="button">
+              <span id="ptt-label">PTT</span>
+              <small id="ptt-cap">HOLD / DBL TAP</small>
+            </button>
+            <div class="hint">Hold to talk. Double-tap to latch.</div>
+          </div>
+          <div class="log" id="log"></div>
+        </section>
+        <section data-panel="mesh" hidden>
+          <div class="radar-wrap">
+            <canvas id="radar" width="360" height="360"></canvas>
+            <div class="radar-legend">
+              <span>tap a blip</span>
+              <button class="ghost tiny" id="btn-link" type="button">Link</button>
+            </div>
+          </div>
+          <div id="heard" class="heard-strip"></div>
+        </section>
+        <section data-panel="chat" hidden>
+          <div id="thread-list" class="thread-list"></div>
+        </section>
+        <section data-panel="id" hidden>
+          <div class="card">
+            <div class="kicker">Identity</div>
+            <div class="hash" id="fullhash"></div>
+            <p class="muted" style="margin-top:10px">Callsign <span id="idname"></span>. Stored on this device only.</p>
+            <div class="actions">
+              <button id="btn-rename" type="button">Rename</button>
+              <button id="btn-newid" type="button">New identity</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+    <div class="sheet" id="sheet" hidden>
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="kicker" id="sheet-kind">station</div>
+        <h2 id="sheet-name">—</h2>
+        <div class="hash" id="sheet-hash"></div>
+        <div class="sheet-meta" id="sheet-meta"></div>
+        <div class="sheet-grid">
+          <button type="button" data-act="chat">Chat</button>
+          <button type="button" data-act="ptt">Direct PTT</button>
+          <button type="button" data-act="pin">Pin</button>
+          <button type="button" data-act="mute">Mute</button>
+          <button type="button" data-act="copy">Copy ID</button>
+          <button type="button" data-act="watch">Watch</button>
+        </div>
+        <button class="ghost full" id="sheet-close" type="button">Close</button>
+      </div>
+    </div>
+    <div class="chat-win" id="chat-win" hidden>
+      <header>
+        <button type="button" id="chat-back">‹</button>
+        <div>
+          <strong id="chat-title">Chat</strong>
+          <div class="muted" id="chat-sub"></div>
+        </div>
+      </header>
+      <div class="msgs" id="msgs"></div>
+      <form id="chat-form">
+        <input id="chat-input" maxlength="280" placeholder="Message over mesh…" autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+    <div class="modal" id="link-modal" hidden>
+      <div class="card">
+        <div class="kicker">Peer handshake</div>
+        <p class="muted">Invite on A, paste on B, paste the answer back on A.</p>
+        <div class="actions">
+          <button class="primary" id="btn-invite" type="button">Create invite</button>
+          <button id="btn-apply" type="button">Apply paste</button>
+        </div>
+        <textarea id="paste" placeholder="Paste offer or answer JSON"></textarea>
+        <textarea id="invite" readonly placeholder="Invite / answer appears here"></textarea>
+        <button class="ghost full" id="link-close" type="button">Done</button>
+      </div>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>
