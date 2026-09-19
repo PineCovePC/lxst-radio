@@ -1,13 +1,19 @@
-const KEY = "lxst.v5";
+const KEY = "lxst.v6";
 const CHAT_KEY = "lxst.chats.v1";
 const FLAGS_KEY = "lxst.flags.v1";
-const GHOSTS = ["NETTLE", "BRAMBLE", "FEN", "CAIRN", "SKERRY", "MOSS"];
 const CHANNELS = [
   { id: "calling", name: "Calling", aspect: "lxst.ptt.calling" },
   { id: "tactical", name: "Tactical", aspect: "lxst.ptt.tactical" },
   { id: "logistics", name: "Logistics", aspect: "lxst.ptt.logistics" },
   { id: "night", name: "Night Watch", aspect: "lxst.ptt.nightwatch" },
 ];
+const BROKERS = [
+  "wss://broker.emqx.io:8084/mqtt",
+  "wss://broker.hivemq.com:8884/mqtt",
+];
+const RADIO_RATE = 8000;
+const FRAME_SAMPLES = 320;
+const STALE_MS = 22000;
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -17,6 +23,7 @@ const state = {
   callsign: "",
   hash: "",
   dest: "",
+  peerId: "",
   tab: "radio",
   channelId: "calling",
   stations: [],
@@ -30,9 +37,22 @@ const state = {
   hits: [],
   vol: 0.88,
   chatPeer: null,
+  meshUp: false,
+  channelMeta: {},
 };
 
-let actx, osc, gain, vuTimer;
+let actx,
+  osc,
+  gain,
+  vuTimer,
+  mesh,
+  micStream,
+  captureNode,
+  pendingPcm = new Int16Array(0),
+  audioSeq = 0,
+  nextPlayAt = 0,
+  rxTimer = null;
+
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const pretty = (h) => `<${(h || "").slice(0, 16)}>`;
 const grouped = (h) => (h || "").replace(/(.{4})/g, "$1 ").trim();
@@ -74,14 +94,226 @@ function save() {
     }),
   );
 }
-function seedGhosts(identity) {
-  return GHOSTS.map((name, i) => ({
-    id: "ghost-" + name.toLowerCase(),
-    name,
-    hash: (identity.slice(0, 8) + name.toLowerCase()).slice(0, 32),
-    ghost: true,
-    rtt: Math.round(40 + hashNum(identity, i + 3) * 180),
-  }));
+
+function remaining(len) {
+  const out = [];
+  do {
+    let d = len % 128;
+    len = Math.floor(len / 128);
+    if (len > 0) d |= 0x80;
+    out.push(d);
+  } while (len > 0);
+  return out;
+}
+function encodeStr(s) {
+  const bytes = [...new TextEncoder().encode(s)];
+  return [(bytes.length >> 8) & 255, bytes.length & 255, ...bytes];
+}
+function mqttPacket(type, flags, body) {
+  return Uint8Array.from([(type << 4) | flags, ...remaining(body.length), ...body]);
+}
+function readStr(buf, i) {
+  const len = (buf[i] << 8) | buf[i + 1];
+  return [new TextDecoder().decode(buf.subarray(i + 2, i + 2 + len)), i + 2 + len];
+}
+
+class MqttLite {
+  constructor(opts) {
+    this.opts = opts;
+    this.ws = null;
+    this.ping = null;
+    this.closed = false;
+    this.brokerIndex = 0;
+    this.pendingSub = [];
+    this.pendingPub = [];
+  }
+  start() {
+    this.closed = false;
+    this.open();
+  }
+  subscribe(topic) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pendingSub.push(topic);
+      return;
+    }
+    this.sendSub(topic);
+  }
+  publish(topic, payload, retain) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pendingPub.push({ topic, payload, retain: !!retain });
+      if (this.pendingPub.length > 24) this.pendingPub.shift();
+      return;
+    }
+    this.sendPub(topic, payload, !!retain);
+  }
+  close() {
+    this.closed = true;
+    if (this.ping) clearInterval(this.ping);
+    this.ping = null;
+    try {
+      this.ws && this.ws.close();
+    } catch {}
+    this.ws = null;
+  }
+  open() {
+    if (this.closed) return;
+    const url = BROKERS[this.brokerIndex % BROKERS.length];
+    let ws;
+    try {
+      ws = new WebSocket(url, "mqtt");
+    } catch {
+      this.retry();
+      return;
+    }
+    this.ws = ws;
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => this.sendConnect();
+    ws.onmessage = (ev) => this.onBytes(new Uint8Array(ev.data));
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      if (this.ping) clearInterval(this.ping);
+      this.ping = null;
+      this.opts.onClose && this.opts.onClose();
+      if (!this.closed) this.retry();
+    };
+  }
+  retry() {
+    this.brokerIndex += 1;
+    setTimeout(() => this.open(), 800 + Math.random() * 800);
+  }
+  sendConnect() {
+    const proto = encodeStr("MQTT");
+    const flags = this.opts.willTopic ? 0x26 : 0x02;
+    const id = encodeStr(this.opts.clientId.slice(0, 60));
+    const will = this.opts.willTopic
+      ? [...encodeStr(this.opts.willTopic), ...encodeStr(this.opts.willPayload || "")]
+      : [];
+    this.ws.send(mqttPacket(1, 0, [...proto, 4, flags, 0, 30, ...id, ...will]));
+  }
+  sendSub(topic) {
+    this.ws.send(mqttPacket(8, 2, [0, 1, ...encodeStr(topic), 0]));
+  }
+  sendPub(topic, payload, retain) {
+    const body = [...encodeStr(topic), ...new TextEncoder().encode(payload)];
+    this.ws.send(mqttPacket(3, retain ? 1 : 0, body));
+  }
+  onBytes(buf) {
+    let i = 0;
+    while (i < buf.length) {
+      const type = buf[i] >> 4;
+      let len = 0;
+      let mul = 1;
+      let j = i + 1;
+      if (j >= buf.length) break;
+      for (;;) {
+        if (j >= buf.length) return;
+        const d = buf[j++];
+        len += (d & 127) * mul;
+        mul *= 128;
+        if ((d & 128) === 0) break;
+      }
+      if (j + len > buf.length) return;
+      const payload = buf.subarray(j, j + len);
+      i = j + len;
+      if (type === 2) {
+        if ((payload[1] || 0) !== 0) {
+          try {
+            this.ws.close();
+          } catch {}
+          return;
+        }
+        this.opts.onConnect && this.opts.onConnect();
+        if (this.ping) clearInterval(this.ping);
+        this.ping = setInterval(() => this.ws && this.ws.send(Uint8Array.from([0xc0, 0])), 20000);
+        const subs = this.pendingSub.splice(0);
+        for (const t of subs) this.sendSub(t);
+        const pubs = this.pendingPub.splice(0);
+        for (const p of pubs) this.sendPub(p.topic, p.payload, p.retain);
+      } else if (type === 3) {
+        const [topic, k] = readStr(payload, 0);
+        this.opts.onMessage && this.opts.onMessage(topic, new TextDecoder().decode(payload.subarray(k)));
+      }
+    }
+  }
+}
+
+function meshBase(room) {
+  const r = room.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40) || "calling";
+  return "lxst/6/" + r;
+}
+
+class MqttMesh {
+  constructor(opts) {
+    this.base = meshBase(opts.room);
+    this.selfId = opts.selfId;
+    this.onPacket = opts.onPacket;
+    this.onStatus = opts.onStatus;
+    this.onLeave = opts.onLeave;
+    this.client = null;
+    this.up = false;
+  }
+  start() {
+    const presence = this.base + "/p/" + this.selfId;
+    const client = new MqttLite({
+      clientId: ("lx" + this.selfId).slice(0, 60),
+      willTopic: presence,
+      willPayload: "",
+      onConnect: () => {
+        this.up = true;
+        this.onStatus(true);
+        client.subscribe(this.base + "/p/+");
+        client.subscribe(this.base + "/m");
+      },
+      onClose: () => {
+        this.up = false;
+        this.onStatus(false);
+      },
+      onMessage: (topic, payload) => this.handle(topic, payload),
+    });
+    this.client = client;
+    client.start();
+  }
+  send(packet, retain) {
+    const json = JSON.stringify({ f: this.selfId, d: packet });
+    if (packet.k === "ann") this.client && this.client.publish(this.base + "/p/" + this.selfId, json, true);
+    this.client && this.client.publish(this.base + "/m", json, !!retain);
+  }
+  close() {
+    try {
+      this.client && this.client.publish(this.base + "/p/" + this.selfId, "", true);
+    } catch {}
+    this.client && this.client.close();
+    this.client = null;
+    this.up = false;
+  }
+  handle(topic, payload) {
+    const parts = topic.split("/");
+    if (parts[3] === "p") {
+      const from = parts[4] || "";
+      if (!from || from === this.selfId) return;
+      if (!payload) {
+        this.onLeave(from);
+        return;
+      }
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed.f !== "string" || !parsed.d || !parsed.d.k) return;
+    if (parsed.f === this.selfId) return;
+    this.onPacket(parsed.f, parsed.d);
+  }
+}
+
+function sessionId() {
+  let s = sessionStorage.getItem("lxst.session");
+  if (s && /^[a-z0-9]+$/i.test(s)) return s.slice(0, 8);
+  s = hex(crypto.getRandomValues(new Uint8Array(3)));
+  sessionStorage.setItem("lxst.session", s);
+  return s;
 }
 
 async function bootIdentity() {
@@ -93,13 +325,22 @@ async function bootIdentity() {
   state.seed = persisted.seed;
   state.hash = await sha16("lxst:id:" + persisted.seed);
   state.dest = await sha16("lxst.ptt:" + state.hash);
+  state.peerId = ("i" + state.hash.slice(0, 24) + sessionId()).slice(0, 64);
   state.callsign = (persisted.callsign || "OP-" + state.hash.slice(0, 4).toUpperCase()).slice(0, 16);
   state.onboarded = Boolean(persisted.onboarded);
   state.channelId = persisted.channelId || "calling";
   state.vol = typeof persisted.vol === "number" ? persisted.vol : 0.88;
-  state.stations = seedGhosts(state.hash);
+  state.stations = [];
   state.chats = loadJson(CHAT_KEY, {});
   state.flags = loadJson(FLAGS_KEY, {});
+  for (const c of CHANNELS) {
+    const destHash = await sha16(c.aspect);
+    state.channelMeta[c.id] = {
+      destHash,
+      room: "ch" + destHash.slice(0, 30),
+      freq: freqFrom(destHash),
+    };
+  }
   state.ready = true;
 }
 
@@ -107,21 +348,49 @@ function flag(id) {
   return state.flags[id] || { pin: false, mute: false };
 }
 function setFlag(id, key) {
-  const cur = flag(id);
+  const cur = { pin: false, mute: false, ...flag(id) };
   cur[key] = !cur[key];
   state.flags[id] = cur;
   localStorage.setItem(FLAGS_KEY, JSON.stringify(state.flags));
-  if (key === "mute" && cur.mute && state.selected === id) select(null);
   renderSheet();
+  renderMesh();
+  renderChat();
 }
 function channel() {
   return CHANNELS.find((c) => c.id === state.channelId) || CHANNELS[0];
 }
+function meta() {
+  return state.channelMeta[state.channelId] || { destHash: state.dest, room: "calling", freq: "7.074" };
+}
 function station(id) {
   return state.stations.find((s) => s.id === id);
 }
-function visibleStations() {
-  return state.stations.filter((s) => !flag(s.id).mute);
+function upsertStation(id, patch) {
+  const existing = station(id);
+  const next = {
+    id,
+    name: (patch.name || (existing && existing.name) || id.slice(0, 8)).slice(0, 16),
+    hash: patch.hash || (existing && existing.hash) || "",
+    talking: patch.talking !== undefined ? patch.talking : existing ? existing.talking : false,
+    lastHeard: patch.lastHeard || Date.now(),
+  };
+  if (existing) {
+    Object.assign(existing, next);
+  } else {
+    state.stations.push(next);
+  }
+  renderHeader();
+  renderLcd();
+  if (state.tab === "mesh") renderMesh();
+  if (state.tab === "chat") renderChat();
+}
+function dropStation(id) {
+  state.stations = state.stations.filter((s) => s.id !== id);
+  if (state.selected === id) state.selected = null;
+  renderHeader();
+  renderLcd();
+  renderSheet();
+  if (state.tab === "mesh") renderMesh();
 }
 
 function show(id) {
@@ -146,17 +415,25 @@ function renderHeader() {
 
 function renderLcd() {
   const ch = channel();
-  const dest = state.dest;
-  $("#lcd-freq").textContent = freqFrom(dest + ch.id);
+  const m = meta();
+  $("#lcd-freq").textContent = m.freq;
   $("#lcd-aspect").textContent = "MHz · " + ch.aspect;
   $("#lcd-name").textContent = ch.name;
-  $("#lcd-dest").textContent = pretty(dest);
+  $("#lcd-dest").textContent = pretty(m.destHash);
   const sel = station(state.selected);
-  $("#lcd-status").textContent = state.tx ? "TX ON AIR" : sel ? "TO " + sel.name : "NET OPEN";
+  $("#lcd-status").textContent = state.tx
+    ? "TX ON AIR"
+    : sel
+      ? "TO " + sel.name
+      : state.meshUp
+        ? "NET OPEN"
+        : "SCANNING";
   $("#lcd-status").style.color = state.tx ? "var(--tx)" : "var(--lcd-dim)";
-  $("#lcd-count").textContent = "0/" + visibleStations().length + " lnk";
+  const live = state.stations.length;
+  $("#lcd-count").textContent = live + "/" + live + " lnk";
   $('[data-led="tx"]').classList.toggle("on", state.tx);
   $('[data-led="tx"]').classList.toggle("tx", state.tx);
+  $('[data-led="net"]').classList.toggle("on", state.meshUp);
   $("#status-mark").classList.toggle("tx", state.tx);
   $("#status-mark").textContent = state.tx ? "TX" : "LXST";
 }
@@ -178,25 +455,27 @@ function renderSheet() {
   const f = flag(st.id);
   sheet.hidden = false;
   $("#sheet-name").textContent = st.name;
-  $("#sheet-kind").textContent = st.ghost ? "sim" : "live";
+  $("#sheet-kind").textContent = f.mute ? "🔇" : "live";
   $("#act-pin").textContent = f.pin ? "Unpin" : "Pin";
   $("#act-mute").textContent = f.mute ? "Unmute" : "Mute";
 }
 
 function renderMesh() {
   const list = $("#mesh-list");
-  const rows = visibleStations();
-  if (!rows.length) {
-    list.innerHTML = `<li><div class="card muted">No stations on this destination.</div></li>`;
+  $("#mesh-blurb").textContent = state.meshUp
+    ? "Live peers on this channel. Tap a station for simplex PTT."
+    : "Joining destination…";
+  if (!state.stations.length) {
+    list.innerHTML = `<li><div class="card muted">No live peers yet. Open this page on a second phone, stay on the same channel, and wait for the Net LED.</div></li>`;
     return;
   }
-  list.innerHTML = rows
+  list.innerHTML = state.stations
     .map((s) => {
       const f = flag(s.id);
       return `<li>
         <button type="button" class="row" data-pick="${s.id}">
-          <strong>${escapeHtml(s.name)}</strong>
-          <span class="preview">${s.ghost ? "simulated contact" : escapeHtml(pretty(s.hash))}${f.pin ? " · pinned" : ""}</span>
+          <strong>${escapeHtml(s.name)}${f.mute ? " 🔇" : ""}</strong>
+          <span class="preview">${escapeHtml(pretty(s.hash))}${f.pin ? " · pinned" : ""}</span>
         </button>
         <button type="button" class="side" data-chat="${s.id}">Chat</button>
       </li>`;
@@ -211,18 +490,23 @@ function renderThreads() {
     return {
       id: s.id,
       name: s.name,
-      ghost: s.ghost,
       last,
       unread: (thread && thread.unread) || 0,
       t: last ? last.t : 0,
+      mute: flag(s.id).mute,
     };
   });
   contacts.sort((a, b) => b.t - a.t || a.name.localeCompare(b.name));
+  if (!contacts.length) {
+    $("#thread-list").innerHTML =
+      `<li><div class="card muted">Quiet net. A live station on this channel will show up here.</div></li>`;
+    return;
+  }
   $("#thread-list").innerHTML = contacts
     .map(
       (r) => `<li>
         <button type="button" class="row" data-open="${r.id}">
-          <strong>${escapeHtml(r.name)}${r.ghost ? ' <span class="faint">sim</span>' : ""}</strong>
+          <strong>${escapeHtml(r.name)}${r.mute ? " 🔇" : ""}</strong>
           <span class="preview">${escapeHtml((r.last && r.last.text) || "No traffic yet")}</span>
         </button>
         ${r.unread ? `<span class="unread">${r.unread}</span>` : ""}
@@ -252,11 +536,12 @@ function renderChat() {
     const st = station(state.chatPeer);
     $("#chat-home").hidden = true;
     $("#chat-room").hidden = false;
-    $("#chat-title").textContent = st.name;
-    $("#chat-sub").textContent = st.ghost ? "simulated contact" : pretty(st.hash);
+    $("#chat-title").textContent = st.name + (flag(st.id).mute ? " 🔇" : "");
+    $("#chat-sub").textContent = pretty(st.hash);
     $("#chat-in").placeholder = "Message " + st.name;
     renderMsgs();
   } else {
+    state.chatPeer = state.chatPeer && station(state.chatPeer) ? state.chatPeer : null;
     $("#chat-home").hidden = false;
     $("#chat-room").hidden = true;
     renderThreads();
@@ -320,6 +605,67 @@ function pushMsg(id, msg) {
   if (state.tab === "chat") renderChat();
 }
 
+function sendPacket(packet) {
+  const to = state.directed || (packet.k === "lx" ? state.chatPeer : state.selected);
+  if (to && packet.k !== "ann") packet.to = to;
+  mesh && mesh.send(packet);
+}
+
+function announce() {
+  sendPacket({ k: "ann", cs: state.callsign, ih: state.hash, dh: state.dest });
+}
+
+function startMesh() {
+  if (mesh) {
+    try {
+      mesh.close();
+    } catch {}
+  }
+  const m = meta();
+  mesh = new MqttMesh({
+    room: m.room,
+    selfId: state.peerId,
+    onStatus: (up) => {
+      state.meshUp = up;
+      renderLcd();
+      renderBars(up ? Math.min(4, 1 + state.stations.length) : 0);
+      if (up) announce();
+      if (state.tab === "mesh") renderMesh();
+    },
+    onLeave: (from) => dropStation(from),
+    onPacket: onMeshPacket,
+  });
+  mesh.start();
+}
+
+function onMeshPacket(from, data) {
+  if (data.to && data.to !== state.peerId) return;
+  const muted = flag(from).mute;
+  if (data.k === "ann") {
+    upsertStation(from, { name: data.cs, hash: data.ih, lastHeard: Date.now() });
+  } else if (data.k === "ptt") {
+    upsertStation(from, { name: data.cs, talking: data.on, lastHeard: Date.now() });
+    if (data.on && !muted) {
+      $('[data-led="rx"]').classList.add("on");
+      if (rxTimer) clearTimeout(rxTimer);
+      rxTimer = setTimeout(() => $('[data-led="rx"]').classList.remove("on"), 600);
+    }
+  } else if (data.k === "a") {
+    if (muted) return;
+    upsertStation(from, { talking: true, lastHeard: Date.now() });
+    void playRx(data.p);
+    $('[data-led="rx"]').classList.add("on");
+    if (rxTimer) clearTimeout(rxTimer);
+    rxTimer = setTimeout(() => {
+      $('[data-led="rx"]').classList.remove("on");
+      upsertStation(from, { talking: false });
+    }, 420);
+  } else if (data.k === "lx") {
+    upsertStation(from, { name: data.cs, lastHeard: Date.now() });
+    pushMsg(from, { from: "them", text: data.m, t: Date.now() });
+  }
+}
+
 async function ensureAudio() {
   if (!actx) actx = new AudioContext();
   if (actx.state === "suspended") await actx.resume();
@@ -335,6 +681,106 @@ function stopTone() {
   } catch {}
   osc = gain = null;
 }
+
+function downsample(input, fromRate) {
+  const ratio = fromRate / RADIO_RATE;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const sample = input[Math.floor(i * ratio)] || 0;
+    const clipped = Math.max(-1, Math.min(1, sample));
+    out[i] = clipped < 0 ? clipped * 0x8000 : clipped * 0x7fff;
+  }
+  return out;
+}
+function int16ToB64(samples) {
+  const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+function flushPcm() {
+  while (pendingPcm.length >= FRAME_SAMPLES) {
+    const frame = pendingPcm.subarray(0, FRAME_SAMPLES);
+    pendingPcm = pendingPcm.subarray(FRAME_SAMPLES);
+    sendPacket({ k: "a", s: audioSeq++, p: int16ToB64(frame) });
+  }
+}
+
+async function startMic() {
+  const audio = await ensureAudio();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch {
+    return;
+  }
+  const src = audio.createMediaStreamSource(micStream);
+  const proc = audio.createScriptProcessor(2048, 1, 1);
+  pendingPcm = new Int16Array(0);
+  proc.onaudioprocess = (ev) => {
+    if (!state.tx) return;
+    const ch = ev.inputBuffer.getChannelData(0);
+    const down = downsample(ch, audio.sampleRate);
+    const merged = new Int16Array(pendingPcm.length + down.length);
+    merged.set(pendingPcm);
+    merged.set(down, pendingPcm.length);
+    pendingPcm = merged;
+    flushPcm();
+  };
+  src.connect(proc);
+  const silent = audio.createGain();
+  silent.gain.value = 0.00001;
+  proc.connect(silent);
+  silent.connect(audio.destination);
+  captureNode = proc;
+}
+
+function stopMic() {
+  try {
+    captureNode && captureNode.disconnect();
+  } catch {}
+  captureNode = null;
+  if (micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
+  pendingPcm = new Int16Array(0);
+}
+
+async function playRx(b64) {
+  try {
+    const audio = await ensureAudio();
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const samples = new Int16Array(bytes.buffer);
+    if (!samples.length) return;
+    const pcm = new Float32Array(samples.length);
+    let peak = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const v = samples[i] < 0 ? samples[i] / 0x8000 : samples[i] / 0x7fff;
+      pcm[i] = v;
+      peak = Math.max(peak, Math.abs(v));
+    }
+    if (peak < 0.04) return;
+    const buffer = audio.createBuffer(1, pcm.length, RADIO_RATE);
+    buffer.copyToChannel(pcm, 0);
+    const src = audio.createBufferSource();
+    const g = audio.createGain();
+    g.gain.value = state.vol;
+    src.buffer = buffer;
+    src.connect(g);
+    g.connect(audio.destination);
+    const now = audio.currentTime;
+    if (nextPlayAt < now + 0.04) nextPlayAt = now + 0.04;
+    src.start(nextPlayAt);
+    nextPlayAt += buffer.duration;
+    renderVu(Math.min(1, peak * 2.2), false);
+  } catch {}
+}
+
 async function startTx() {
   const audio = await ensureAudio();
   stopTone();
@@ -352,6 +798,8 @@ async function startTx() {
   $(".ptt .ptt-k").textContent = "TX";
   renderLcd();
   renderBars(4);
+  sendPacket({ k: "ptt", on: true, cs: state.callsign });
+  void startMic();
   let t = 0;
   clearInterval(vuTimer);
   vuTimer = setInterval(() => {
@@ -361,6 +809,8 @@ async function startTx() {
 }
 function stopTx() {
   stopTone();
+  stopMic();
+  if (state.tx) sendPacket({ k: "ptt", on: false, cs: state.callsign });
   state.tx = false;
   $("#ptt").classList.remove("hot");
   $("#ptt-cap").textContent = "Hold";
@@ -368,7 +818,7 @@ function stopTx() {
   clearInterval(vuTimer);
   renderVu(0, false);
   renderLcd();
-  renderBars(1);
+  renderBars(state.meshUp ? Math.min(4, 1 + state.stations.length) : 0);
   renderHeader();
 }
 
@@ -421,8 +871,7 @@ function drawRadar() {
   ctx.fill();
   ctx.restore();
 
-  const nodes = visibleStations();
-  const hits = nodes.map((s) => {
+  const hits = state.stations.map((s) => {
     const a = -Math.PI / 2 + angleFor(s.id);
     const r = radius * (0.78 + angleFor(s.id + "r") * 0.18);
     return { s, x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r };
@@ -432,18 +881,25 @@ function drawRadar() {
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(p.x, p.y);
-    ctx.strokeStyle = "rgba(232, 238, 233, 0.12)";
+    ctx.strokeStyle = p.s.talking || state.tx ? "rgba(126, 201, 154, 0.55)" : "rgba(232, 238, 233, 0.12)";
     ctx.stroke();
   }
-  drawNode(ctx, cx, cy, state.tx ? "#c45c4a" : "#7ec99a", state.tx, state.callsign.slice(0, 8), false);
+  drawNode(ctx, cx, cy, state.tx ? "#c45c4a" : "#7ec99a", state.tx, state.callsign.slice(0, 8), false, false);
   for (const p of hits) {
     const f = flag(p.s.id);
     const sel = state.selected === p.s.id;
-    const color = sel ? "#e8eee9" : f.pin ? "#c9a86a" : p.s.ghost ? "#8a968e" : "#7ec99a";
-    drawNode(ctx, p.x, p.y, color, sel, p.s.name.slice(0, 8), sel);
+    const color = sel ? "#e8eee9" : f.pin ? "#c9a86a" : p.s.talking ? "#c45c4a" : "#7ec99a";
+    drawNode(ctx, p.x, p.y, color, sel || p.s.talking, p.s.name.slice(0, 8), sel, f.mute);
   }
 }
-function drawNode(ctx, x, y, color, pulse, label, selected) {
+function drawNode(ctx, x, y, color, pulse, label, selected, muted) {
+  if (selected) {
+    ctx.beginPath();
+    ctx.arc(x, y, 13, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(232, 238, 233, 0.85)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
   if (pulse) {
     ctx.beginPath();
     ctx.arc(x, y, selected ? 16 : 14, 0, Math.PI * 2);
@@ -454,8 +910,13 @@ function drawNode(ctx, x, y, color, pulse, label, selected) {
   ctx.arc(x, y, selected ? 7 : 5.5, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
+  if (muted) {
+    ctx.font = "13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("🔇", x, y - 12);
+  }
   ctx.font = "500 10px 'IBM Plex Mono', monospace";
-  ctx.fillStyle = "rgba(232, 238, 233, 0.72)";
+  ctx.fillStyle = selected ? "rgba(232, 238, 233, 0.95)" : "rgba(232, 238, 233, 0.72)";
   ctx.textAlign = "center";
   ctx.fillText(label, x, y + 18);
 }
@@ -487,9 +948,10 @@ function enter() {
   renderLcd();
   renderChips();
   renderVu(0, false);
-  renderBars(1);
+  renderBars(0);
   $("#vol").value = String(state.vol);
   resizeRadar();
+  startMesh();
   try {
     navigator.vibrate?.(12);
   } catch {}
@@ -497,6 +959,7 @@ function enter() {
 
 async function main() {
   await bootIdentity();
+  window.__lxst = state;
   $("#on-hash").textContent = pretty(state.dest);
   $("#on-call").value = state.callsign;
   renderHeader();
@@ -505,6 +968,14 @@ async function main() {
   };
   tick();
   setInterval(tick, 10000);
+  setInterval(() => {
+    if (!state.onboarded) return;
+    if (state.meshUp) announce();
+    const now = Date.now();
+    for (const s of [...state.stations]) {
+      if (now - s.lastHeard > STALE_MS) dropStation(s.id);
+    }
+  }, 3000);
 
   if (state.onboarded) enter();
   else show("panel-onboard");
@@ -522,18 +993,26 @@ async function main() {
     const id = e.target.dataset.ch;
     if (!id) return;
     state.channelId = id;
+    state.stations = [];
+    state.selected = null;
     save();
     renderChips();
     renderLcd();
+    renderSheet();
+    startMesh();
   });
   $("#ch-prev").addEventListener("click", () => stepCh(-1));
   $("#ch-next").addEventListener("click", () => stepCh(1));
   function stepCh(dir) {
     const i = CHANNELS.findIndex((c) => c.id === state.channelId);
     state.channelId = CHANNELS[(i + dir + CHANNELS.length) % CHANNELS.length].id;
+    state.stations = [];
+    state.selected = null;
     save();
     renderChips();
     renderLcd();
+    renderSheet();
+    startMesh();
   }
 
   $("#radar").addEventListener("pointerdown", (e) => {
@@ -583,24 +1062,14 @@ async function main() {
     if (!text || !state.chatPeer) return;
     $("#chat-in").value = "";
     pushMsg(state.chatPeer, { from: "me", text, t: Date.now() });
-    const st = station(state.chatPeer);
-    if (st && st.ghost) {
-      setTimeout(() => {
-        const replies = ["Copy.", "Stand by.", "On frequency.", "Roger."];
-        pushMsg(st.id, { from: "them", text: replies[Math.floor(Math.random() * replies.length)], t: Date.now() });
-      }, 500);
-    }
+    sendPacket({ k: "lx", m: text.slice(0, 240), cs: state.callsign, to: state.chatPeer });
   });
   $("#burst-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const text = $("#burst-in").value.trim();
     if (!text) return;
     $("#burst-in").value = "";
-    const first = visibleStations()[0];
-    if (first) {
-      pushMsg(first.id, { from: "me", text, t: Date.now() });
-      setTimeout(() => pushMsg(first.id, { from: "them", text: "Copy.", t: Date.now() }), 400);
-    }
+    sendPacket({ k: "lx", m: text.slice(0, 240), cs: state.callsign });
   });
   $("#btn-share").addEventListener("click", async () => {
     const url = location.href;
@@ -621,6 +1090,7 @@ async function main() {
     if (next) state.callsign = next;
     save();
     renderHeader();
+    if (state.meshUp) announce();
   });
   $("#btn-newid").addEventListener("click", async () => {
     localStorage.removeItem(KEY);
@@ -630,6 +1100,7 @@ async function main() {
     renderHeader();
     renderId();
     renderLcd();
+    startMesh();
   });
   $("#vol").addEventListener("input", (e) => {
     state.vol = Number(e.target.value);
@@ -681,7 +1152,7 @@ if ("serviceWorker" in navigator) {
     location.reload();
   });
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js?v=5").catch(() => {});
+    navigator.serviceWorker.register("./sw.js?v=6").catch(() => {});
   });
 }
 

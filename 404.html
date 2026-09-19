@@ -24,7 +24,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="./styles.css?v=5" />
+    <link rel="stylesheet" href="./styles.css?v=6" />
   </head>
   <body>
     <div class="shell">
@@ -75,8 +75,10 @@
             <p class="kicker accent">LXST · android radio</p>
             <h1>Push-to-talk over a cryptographic mesh</h1>
             <p class="muted">
-              A destination hash is your address. Hold to talk. Audio travels peer-to-peer — no
-              operator account.
+              A destination hash is your address. Hold to talk. Two phones on
+              the same channel find each other over the mesh — no operator
+              account.
+
             </p>
             <div class="card">
               <p class="kicker faint">Delivery destination</p>
@@ -125,7 +127,7 @@
             <div class="radar-tag">Mesh · tap a station</div>
             <div class="sheet" id="sheet" hidden>
               <div class="sheet-top">
-                <p><strong id="sheet-name">—</strong> <span class="faint" id="sheet-kind">sim</span></p>
+                <p><strong id="sheet-name">—</strong> <span class="faint" id="sheet-kind">live</span></p>
                 <button type="button" class="text" id="sheet-clear">Clear</button>
               </div>
               <div class="sheet-grid">
@@ -157,7 +159,7 @@
             <div>
               <p class="kicker faint">Mesh</p>
               <h2>Announced stations</h2>
-              <p class="muted" id="mesh-blurb">Simulated net until a live peer joins.</p>
+              <p class="muted" id="mesh-blurb">Live stations appear when they announce on this channel.</p>
             </div>
             <button type="button" class="btn subtle" id="btn-share">Share</button>
           </header>
@@ -174,7 +176,7 @@
               <div>
                 <p class="kicker faint">Chat</p>
                 <h2>Threads</h2>
-                <p class="muted">Pick a station, or tap a blip on Radio.</p>
+                <p class="muted">Pick a live station, or tap a blip on Radio.</p>
               </div>
             </header>
             <ul class="rows" id="thread-list"></ul>
@@ -230,6 +232,6 @@
       </nav>
       <div class="home"><i></i></div>
     </div>
-    <script src="./app.js?v=5"></script>
+    <script src="./app.js?v=6"></script>
   </body>
 </html>
