@@ -1,5 +1,5 @@
 const CACHE = "lxst-radio-v7";
-const PRECACHE = ["index.html", "manifest.webmanifest", "styles.css?v=7", "app.js?v=7", "favicon.svg"];
+const PRECACHE = ["index.html", "manifest.webmanifest", "styles.css?v=7", "core.js?v=7", "boot.js?v=7", "favicon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
