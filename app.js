@@ -126,6 +126,7 @@ class MqttLite {
     this.brokerIndex = 0;
     this.pendingSub = [];
     this.pendingPub = [];
+    this.lastRx = 0;
   }
   start() {
     this.closed = false;
@@ -148,12 +149,35 @@ class MqttLite {
   }
   close() {
     this.closed = true;
+    this.teardown();
+  }
+  connected() {
+    return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+  }
+  kick() {
+    if (this.closed) {
+      this.start();
+      return;
+    }
+    this.teardown();
+    setTimeout(() => this.open(), 80);
+  }
+  stale(ms) {
+    if (!this.lastRx) return true;
+    return Date.now() - this.lastRx > (ms || 45000);
+  }
+  teardown() {
     if (this.ping) clearInterval(this.ping);
     this.ping = null;
-    try {
-      this.ws && this.ws.close();
-    } catch {}
+    const ws = this.ws;
     this.ws = null;
+    if (!ws) return;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    try {
+      ws.close();
+    } catch {}
   }
   open() {
     if (this.closed) return;
@@ -222,6 +246,7 @@ class MqttLite {
           } catch {}
           return;
         }
+        this.lastRx = Date.now();
         this.opts.onConnect && this.opts.onConnect();
         if (this.ping) clearInterval(this.ping);
         this.ping = setInterval(() => this.ws && this.ws.send(Uint8Array.from([0xc0, 0])), 20000);
@@ -230,8 +255,11 @@ class MqttLite {
         const pubs = this.pendingPub.splice(0);
         for (const p of pubs) this.sendPub(p.topic, p.payload, p.retain);
       } else if (type === 3) {
+        this.lastRx = Date.now();
         const [topic, k] = readStr(payload, 0);
         this.opts.onMessage && this.opts.onMessage(topic, new TextDecoder().decode(payload.subarray(k)));
+      } else if (type === 13) {
+        this.lastRx = Date.now();
       }
     }
   }
@@ -285,6 +313,15 @@ class MqttMesh {
     this.client && this.client.close();
     this.client = null;
     this.up = false;
+  }
+  connected() {
+    return this.up && this.client && this.client.connected();
+  }
+  kick() {
+    this.client && this.client.kick();
+  }
+  stale(ms) {
+    return this.client ? this.client.stale(ms) : true;
   }
   handle(topic, payload) {
     const parts = topic.split("/");
@@ -373,6 +410,7 @@ function upsertStation(id, patch) {
     hash: patch.hash || (existing && existing.hash) || "",
     talking: patch.talking !== undefined ? patch.talking : existing ? existing.talking : false,
     lastHeard: patch.lastHeard || Date.now(),
+    mailUntil: patch.mailUntil !== undefined ? patch.mailUntil : existing ? existing.mailUntil : 0,
   };
   if (existing) {
     Object.assign(existing, next);
@@ -590,6 +628,8 @@ function openChat(id) {
   if (!st) return;
   if (!state.chats[id]) state.chats[id] = { unread: 0, msgs: [] };
   state.chats[id].unread = 0;
+  const stn = station(id);
+  if (stn) stn.mailUntil = 0;
   localStorage.setItem(CHAT_KEY, JSON.stringify(state.chats));
   state.chatPeer = id;
   state.selected = id;
@@ -663,6 +703,9 @@ function onMeshPacket(from, data) {
   } else if (data.k === "lx") {
     upsertStation(from, { name: data.cs, lastHeard: Date.now() });
     pushMsg(from, { from: "them", text: data.m, t: Date.now() });
+    const st = station(from);
+    if (st) st.mailUntil = Date.now() + 12000;
+    if (!muted) void playMailChirp();
   }
 }
 
@@ -680,6 +723,27 @@ function stopTone() {
     gain && gain.disconnect();
   } catch {}
   osc = gain = null;
+}
+
+async function playMailChirp() {
+  try {
+    const audio = await ensureAudio();
+    const t0 = audio.currentTime + 0.01;
+    [1480, 1960].forEach((freq, i) => {
+      const o = audio.createOscillator();
+      const g = audio.createGain();
+      o.frequency.value = freq;
+      o.type = "sine";
+      g.gain.value = 0;
+      o.connect(g);
+      g.connect(audio.destination);
+      const t = t0 + i * 0.09;
+      g.gain.setValueAtTime(0.06 * state.vol, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+      o.start(t);
+      o.stop(t + 0.09);
+    });
+  } catch {}
 }
 
 function downsample(input, fromRate) {
@@ -782,16 +846,8 @@ async function playRx(b64) {
 }
 
 async function startTx() {
-  const audio = await ensureAudio();
+  await ensureAudio();
   stopTone();
-  gain = audio.createGain();
-  gain.gain.value = 0.04 * state.vol;
-  gain.connect(audio.destination);
-  osc = audio.createOscillator();
-  osc.type = "triangle";
-  osc.frequency.value = 880;
-  osc.connect(gain);
-  osc.start();
   state.tx = true;
   $("#ptt").classList.add("hot");
   $("#ptt-cap").textContent = state.latch ? "Latch" : "Live";
@@ -884,15 +940,16 @@ function drawRadar() {
     ctx.strokeStyle = p.s.talking || state.tx ? "rgba(126, 201, 154, 0.55)" : "rgba(232, 238, 233, 0.12)";
     ctx.stroke();
   }
-  drawNode(ctx, cx, cy, state.tx ? "#c45c4a" : "#7ec99a", state.tx, state.callsign.slice(0, 8), false, false);
+  drawNode(ctx, cx, cy, state.tx ? "#c45c4a" : "#7ec99a", state.tx, state.callsign.slice(0, 8), false, false, false);
   for (const p of hits) {
     const f = flag(p.s.id);
     const sel = state.selected === p.s.id;
+    const mail = (p.s.mailUntil || 0) > Date.now();
     const color = sel ? "#e8eee9" : f.pin ? "#c9a86a" : p.s.talking ? "#c45c4a" : "#7ec99a";
-    drawNode(ctx, p.x, p.y, color, sel || p.s.talking, p.s.name.slice(0, 8), sel, f.mute);
+    drawNode(ctx, p.x, p.y, color, sel || p.s.talking || mail, p.s.name.slice(0, 8), sel, f.mute, mail);
   }
 }
-function drawNode(ctx, x, y, color, pulse, label, selected, muted) {
+function drawNode(ctx, x, y, color, pulse, label, selected, muted, mail) {
   if (selected) {
     ctx.beginPath();
     ctx.arc(x, y, 13, 0, Math.PI * 2);
@@ -910,7 +967,14 @@ function drawNode(ctx, x, y, color, pulse, label, selected, muted) {
   ctx.arc(x, y, selected ? 7 : 5.5, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
-  if (muted) {
+  if (mail) {
+    ctx.save();
+    ctx.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(Date.now() / 220));
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("📬", x, y - 12);
+    ctx.restore();
+  } else if (muted) {
     ctx.font = "13px sans-serif";
     ctx.textAlign = "center";
     ctx.fillText("🔇", x, y - 12);
@@ -970,12 +1034,29 @@ async function main() {
   setInterval(tick, 10000);
   setInterval(() => {
     if (!state.onboarded) return;
-    if (state.meshUp) announce();
+    if (document.hidden) return;
+    if (mesh && (!mesh.connected() || mesh.stale())) mesh.kick();
+    if (state.meshUp || (mesh && mesh.connected())) announce();
     const now = Date.now();
     for (const s of [...state.stations]) {
       if (now - s.lastHeard > STALE_MS) dropStation(s.id);
     }
   }, 3000);
+
+  function refreshRoom() {
+    if (!state.onboarded || document.hidden) return;
+    void ensureAudio();
+    if (mesh) mesh.kick();
+    announce();
+    setTimeout(announce, 400);
+    setTimeout(announce, 1400);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshRoom();
+  });
+  window.addEventListener("pageshow", refreshRoom);
+  window.addEventListener("focus", refreshRoom);
+  window.addEventListener("online", refreshRoom);
 
   if (state.onboarded) enter();
   else show("panel-onboard");
@@ -1104,7 +1185,6 @@ async function main() {
   });
   $("#vol").addEventListener("input", (e) => {
     state.vol = Number(e.target.value);
-    if (gain) gain.gain.value = 0.04 * state.vol;
     save();
   });
 
@@ -1152,7 +1232,7 @@ if ("serviceWorker" in navigator) {
     location.reload();
   });
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js?v=6").catch(() => {});
+    navigator.serviceWorker.register("./sw.js?v=8").catch(() => {});
   });
 }
 

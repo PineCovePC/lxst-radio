@@ -2,20 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+    />
     <meta name="theme-color" content="#0c0f0d" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="LXST" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="description" content="Push-to-talk radio over a Reticulum-style cryptographic mesh." />
+    <meta
+      name="description"
+      content="Push-to-talk radio over a Reticulum-style cryptographic mesh."
+    />
     <title>LXST</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" />
-    <link rel="stylesheet" href="./styles.css?v=7" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+    />
+    <link rel="stylesheet" href="./styles.css?v=8" />
   </head>
   <body>
     <div class="shell">
@@ -24,6 +33,7 @@
         <span id="status-mark">LXST</span>
         <span class="bars" id="bars" aria-hidden="true"></span>
       </div>
+
       <header class="top">
         <div class="brand">
           <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
@@ -44,7 +54,176 @@
           <p class="mono dim" id="hdr-sta">0 sta</p>
         </div>
       </header>
-      <main id="main"></main>
+
+      <main id="main">
+        <section id="panel-boot" class="panel on">
+          <p class="kicker accent">LXST</p>
+          <h1>Raising identity</h1>
+          <p class="muted">Hashing local keys into a destination.</p>
+        </section>
+
+        <section id="panel-onboard" class="panel">
+          <div class="onboard">
+            <svg class="mark lg" viewBox="0 0 32 32" aria-hidden="true">
+              <circle cx="16" cy="8" r="3" fill="#7ec99a" />
+              <circle cx="7" cy="23" r="3" fill="#e8eee9" />
+              <circle cx="25" cy="23" r="3" fill="#e8eee9" opacity="0.7" />
+              <path d="M14 10.2 9.2 20.4" stroke="#7ec99a" stroke-width="1.4" fill="none" />
+              <path d="M18 10.2 22.8 20.4" stroke="#e8eee9" stroke-width="1.4" fill="none" opacity="0.4" />
+              <path d="M10.4 23h11.2" stroke="#e8eee9" stroke-width="1.4" fill="none" opacity="0.35" />
+            </svg>
+            <p class="kicker accent">LXST · android radio</p>
+            <h1>Push-to-talk over a cryptographic mesh</h1>
+            <p class="muted">
+              A destination hash is your address. Hold to talk. Two phones on
+              the same channel find each other over the mesh — no operator
+              account.
+
+            </p>
+            <div class="card">
+              <p class="kicker faint">Delivery destination</p>
+              <p class="mono" id="on-hash">—</p>
+              <p class="mono dim">lxst.ptt · single</p>
+            </div>
+            <label class="field">
+              <span class="kicker faint">Callsign</span>
+              <input id="on-call" maxlength="16" autocomplete="off" spellcheck="false" />
+            </label>
+            <button class="btn accent full" id="btn-announce" type="button">Announce identity</button>
+          </div>
+        </section>
+
+        <section id="panel-radio" class="panel radio">
+          <div class="lcd" id="lcd">
+            <div class="lcd-row">
+              <span class="led on" data-led="pwr">Pwr</span>
+              <span class="led on" data-led="net">Net</span>
+              <span class="led" data-led="tx">Tx</span>
+              <span class="led" data-led="rx">Rx</span>
+              <span class="lcd-count" id="lcd-count">0/0 lnk</span>
+            </div>
+            <div class="dial">
+              <button type="button" class="chev" id="ch-prev" aria-label="Previous destination">‹</button>
+              <div>
+                <p class="freq" id="lcd-freq">—</p>
+                <p class="kicker lcd-dim" id="lcd-aspect">MHz · lxst.ptt</p>
+              </div>
+              <button type="button" class="chev" id="ch-next" aria-label="Next destination">›</button>
+            </div>
+            <div class="lcd-row">
+              <div>
+                <p class="ch-name" id="lcd-name">Calling</p>
+                <p class="mono lcd-dim" id="lcd-dest"></p>
+              </div>
+              <p class="kicker lcd-dim" id="lcd-status">SCANNING</p>
+            </div>
+            <div class="vu" id="vu"></div>
+          </div>
+
+          <div class="chips" id="chips"></div>
+
+          <div class="radar-box">
+            <canvas id="radar" aria-label="Mesh radar. Tap a station to select it."></canvas>
+            <div class="radar-tag">Mesh · tap a station</div>
+            <div class="sheet" id="sheet" hidden>
+              <div class="sheet-top">
+                <p><strong id="sheet-name">—</strong> <span class="faint" id="sheet-kind">live</span></p>
+                <button type="button" class="text" id="sheet-clear">Clear</button>
+              </div>
+              <div class="sheet-grid">
+                <button type="button" data-act="chat">Chat</button>
+                <button type="button" data-act="direct">Direct</button>
+                <button type="button" data-act="pin" id="act-pin">Pin</button>
+                <button type="button" data-act="mute" id="act-mute">Mute</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="sliders">
+            <label>Vol <input type="range" id="vol" min="0" max="1" step="0.01" value="0.88" /></label>
+            <label>Sql <input type="range" id="sql" min="0" max="0.4" step="0.01" value="0.04" /></label>
+          </div>
+
+          <div class="ptt-wrap">
+            <button type="button" class="ptt" id="ptt" aria-label="Hold to talk">
+              <span class="ptt-k">PTT</span>
+              <span class="ptt-v" id="ptt-cap">Hold</span>
+            </button>
+            <button type="button" class="latch" id="latch">Latch PTT</button>
+            <p class="hint" id="hint">Hold the pad · or latch. Tap a blip for chat.</p>
+          </div>
+        </section>
+
+        <section id="panel-mesh" class="panel list">
+          <header class="view-h">
+            <div>
+              <p class="kicker faint">Mesh</p>
+              <h2>Announced stations</h2>
+              <p class="muted" id="mesh-blurb">Live stations appear when they announce on this channel.</p>
+            </div>
+            <button type="button" class="btn subtle" id="btn-share">Share</button>
+          </header>
+          <ul class="rows" id="mesh-list"></ul>
+          <form id="burst-form" class="row-form">
+            <input id="burst-in" maxlength="240" placeholder="Short LXMF burst" />
+            <button type="submit" class="btn subtle">Send</button>
+          </form>
+        </section>
+
+        <section id="panel-chat" class="panel list">
+          <div id="chat-home">
+            <header class="view-h">
+              <div>
+                <p class="kicker faint">Chat</p>
+                <h2>Threads</h2>
+                <p class="muted">Pick a live station, or tap a blip on Radio.</p>
+              </div>
+            </header>
+            <ul class="rows" id="thread-list"></ul>
+          </div>
+          <div id="chat-room" hidden>
+            <header class="chat-head">
+              <button type="button" class="btn ghost" id="chat-back">Threads</button>
+              <div>
+                <p class="name" id="chat-title">—</p>
+                <p class="mono dim" id="chat-sub"></p>
+              </div>
+            </header>
+            <div class="msgs" id="msgs"></div>
+            <form id="chat-form" class="row-form">
+              <input id="chat-in" maxlength="240" placeholder="Message" autocomplete="off" />
+              <button type="submit" class="btn subtle">Send</button>
+            </form>
+          </div>
+        </section>
+
+        <section id="panel-id" class="panel list">
+          <header class="view-h">
+            <div>
+              <p class="kicker faint">Identity</p>
+              <h2>Local keys</h2>
+              <p class="muted">Generated on this device. No account.</p>
+            </div>
+          </header>
+          <label class="field">
+            <span class="kicker faint">Callsign</span>
+            <div class="row-form">
+              <input id="id-call" maxlength="16" autocomplete="off" spellcheck="false" />
+              <button type="button" class="btn subtle" id="btn-setcall">Set</button>
+            </div>
+          </label>
+          <div class="card">
+            <p class="kicker faint">Identity</p>
+            <p class="mono" id="id-hash">—</p>
+          </div>
+          <div class="card">
+            <p class="kicker faint">lxst.ptt destination</p>
+            <p class="mono" id="id-dest">—</p>
+          </div>
+          <button type="button" class="btn outline" id="btn-newid">Rotate keys</button>
+        </section>
+      </main>
+
       <nav id="nav" hidden>
         <button type="button" data-tab="radio" class="on">Radio</button>
         <button type="button" data-tab="mesh">Mesh</button>
@@ -53,7 +232,7 @@
       </nav>
       <div class="home"><i></i></div>
     </div>
-    <script src="./core.js?v=7"></script>
-    <script src="./boot.js?v=7"></script>
+    <script src="./core.js?v=8"></script>
+    <script src="./boot.js?v=8"></script>
   </body>
 </html>
